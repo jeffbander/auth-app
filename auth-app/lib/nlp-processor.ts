@@ -1,0 +1,688 @@
+// NLP Processor for Clinical Notes Analysis
+
+import {
+  ALL_CLINICAL_TERMS,
+  ClinicalTerm,
+  NEGATION_PATTERNS,
+  PRESENCE_PATTERNS,
+  CARDIAC_SYMPTOMS,
+  CARDIAC_HISTORY,
+  CARDIAC_FINDINGS,
+  RISK_FACTORS,
+} from "./clinical-terms";
+import {
+  detectSpecialist,
+  DetectedSpecialist,
+  resolveSpecialistConflict,
+} from "./specialist-hierarchy";
+
+export interface DetectedFinding {
+  term: ClinicalTerm;
+  matchedText: string;
+  isPresent: boolean;
+  isNegated: boolean;
+  context: string;
+  specialist: DetectedSpecialist | null;
+  providerName: string | null;
+  date: Date | null;
+  dateString: string | null;
+  confidence: number;
+}
+
+export interface NoteSection {
+  text: string;
+  specialist: DetectedSpecialist | null;
+  providerName: string | null;
+  date: Date | null;
+  dateString: string | null;
+}
+
+export interface AnalysisResult {
+  qualificationStatus: "Qualified" | "Not Qualified" | "Review Needed";
+  primaryIndication: string | null;
+  supportingFindings: string[];
+  clinicalCitations: {
+    finding: string;
+    specialty: string;
+    provider: string | null;
+    date: string | null;
+    priority: number;
+  }[];
+  conflictingInfo: {
+    finding: string;
+    sources: {
+      specialty: string;
+      assessment: string;
+      date: string | null;
+    }[];
+  }[];
+  confidenceLevel: "High" | "Medium" | "Low";
+  allFindings: DetectedFinding[];
+  // Extracted patient information
+  extractedInfo: ExtractedPatientInfo;
+}
+
+// Date extraction patterns - ordered by specificity
+const DATE_PATTERNS: RegExp[] = [
+  /(\d{1,2}\/\d{1,2}\/\d{2,4})/g, // MM/DD/YYYY or M/D/YY
+  /(\d{1,2}-\d{1,2}-\d{2,4})/g, // MM-DD-YYYY
+  /(\d{4}-\d{2}-\d{2})/g, // YYYY-MM-DD
+  /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}/gi,
+  /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}/gi,
+  /(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/gi,
+];
+
+// Labeled date patterns - these take priority as they're explicitly labeled
+const LABELED_DATE_PATTERNS: RegExp[] = [
+  /(?:Appointment|Appt)[\s:]+(\d{1,2}\/\d{1,2}\/\d{2,4})/gi,
+  /(?:Date|Visit\s*Date|DOS|Date\s+of\s+Service|Service\s+Date)[\s:]+(\d{1,2}\/\d{1,2}\/\d{2,4})/gi,
+  /(?:Date|Visit\s*Date|DOS|Date\s+of\s+Service|Service\s+Date)[\s:]+(\d{1,2}-\d{1,2}-\d{2,4})/gi,
+  /(?:Encounter\s+Date|Exam\s+Date|Visit)[\s:]+(\d{1,2}\/\d{1,2}\/\d{2,4})/gi,
+  /(?:Appointment|Appt)[\s:]+(\d{1,2}-\d{1,2}-\d{2,4})/gi,
+];
+
+// Provider name patterns - ordered by specificity (most specific first)
+const PROVIDER_PATTERNS: RegExp[] = [
+  // Attestation patterns (most reliable for ordering provider)
+  /Provider\s+Attestation:\s*I,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO|NP|PA|ARNP|APRN)/gi,
+  /presence\s+of\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO|NP|PA|ARNP|APRN)/gi,
+  /direction\s+(?:of|and\s+in\s+the\s+presence\s+of)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO|NP|PA|ARNP|APRN)/gi,
+  // Ordering provider patterns
+  /(?:Ordering\s+(?:Provider|Physician)):\s*(?:Dr\.?)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/gi,
+  /(?:Referred\s+by|Referral\s+from):\s*(?:Dr\.?)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/gi,
+  // Standard patterns
+  /(?:Attending|Consultant|Primary\s+(?:Care\s+)?Physician):\s*(?:Dr\.?)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/gi,
+  /(?:Signed|Authenticated|Electronically\s+signed)\s+(?:by\s+)?(?:Dr\.?)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/gi,
+  // Name followed by credentials (but exclude department names - must have proper name capitalization)
+  /(?:^|[\s,])([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO|NP|PA|ARNP|APRN)(?:[\s,]|$)/gm,
+  // Dr. prefix patterns
+  /(?:Dr\.?|Doctor)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/g,
+];
+
+// MRN extraction patterns
+const MRN_PATTERNS: RegExp[] = [
+  /(?:MRN|Medical\s+Record\s+(?:Number|No\.?|#))[\s:]*([A-Z0-9-]+)/gi,
+  /(?:Patient\s+(?:ID|Identifier|Number))[\s:]*([A-Z0-9-]+)/gi,
+  /(?:Chart\s+(?:Number|No\.?|#))[\s:]*([A-Z0-9-]+)/gi,
+  /(?:Account\s+(?:Number|No\.?|#))[\s:]*([A-Z0-9-]+)/gi,
+];
+
+/**
+ * Parse a date string into a Date object
+ */
+function parseDate(dateStr: string): Date | null {
+  try {
+    // Try various formats
+    const cleaned = dateStr.trim();
+
+    // MM/DD/YYYY or M/D/YY
+    const slashMatch = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (slashMatch) {
+      let year = parseInt(slashMatch[3]);
+      if (year < 100) year += 2000;
+      return new Date(year, parseInt(slashMatch[1]) - 1, parseInt(slashMatch[2]));
+    }
+
+    // YYYY-MM-DD
+    const isoMatch = cleaned.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (isoMatch) {
+      return new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+    }
+
+    // Try native parsing as fallback
+    const parsed = new Date(cleaned);
+    if (!isNaN(parsed.getTime())) {
+      return parsed;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract dates from text
+ * Prioritizes labeled dates (Appointment, Date:, etc.) over unlabeled dates
+ */
+function extractDates(text: string): { date: Date; dateString: string; isLabeled: boolean }[] {
+  const dates: { date: Date; dateString: string; isLabeled: boolean }[] = [];
+  const seenDates = new Set<string>();
+
+  // First, try to find labeled dates (these are more reliable)
+  for (const pattern of LABELED_DATE_PATTERNS) {
+    pattern.lastIndex = 0;
+    const matches = Array.from(text.matchAll(pattern));
+    for (const match of matches) {
+      // The date is in capture group 1
+      const dateStr = match[1];
+      if (dateStr && !seenDates.has(dateStr)) {
+        const parsed = parseDate(dateStr);
+        if (parsed) {
+          dates.push({ date: parsed, dateString: dateStr, isLabeled: true });
+          seenDates.add(dateStr);
+        }
+      }
+    }
+  }
+
+  // Then look for any other dates in the text
+  for (const pattern of DATE_PATTERNS) {
+    pattern.lastIndex = 0;
+    const matches = Array.from(text.matchAll(pattern));
+    for (const match of matches) {
+      const dateStr = match[0];
+      if (!seenDates.has(dateStr)) {
+        const parsed = parseDate(dateStr);
+        if (parsed) {
+          dates.push({ date: parsed, dateString: dateStr, isLabeled: false });
+          seenDates.add(dateStr);
+        }
+      }
+    }
+  }
+
+  // Sort: labeled dates first, then by date (most recent first)
+  dates.sort((a, b) => {
+    if (a.isLabeled !== b.isLabeled) {
+      return a.isLabeled ? -1 : 1;
+    }
+    return b.date.getTime() - a.date.getTime();
+  });
+
+  return dates;
+}
+
+/**
+ * Check if a string looks like a department/location name rather than a person name
+ */
+function isDepartmentName(name: string): boolean {
+  const departmentKeywords = [
+    'ambulatory', 'department', 'clinic', 'center', 'unit', 'hospital',
+    'medical', 'health', 'care', 'services', 'surgery', 'cardiology',
+    'emergency', 'inpatient', 'outpatient', 'lab', 'laboratory'
+  ];
+  const lowerName = name.toLowerCase();
+  return departmentKeywords.some(keyword => lowerName.includes(keyword));
+}
+
+/**
+ * Check if a string looks like a proper person name
+ */
+function isProperName(name: string): boolean {
+  // Must have at least 2 characters and start with capital
+  if (name.length < 2 || !/^[A-Z]/.test(name)) return false;
+  // Should not be all uppercase (likely an acronym or department)
+  if (name === name.toUpperCase() && name.length > 3) return false;
+  // Should not contain department keywords
+  if (isDepartmentName(name)) return false;
+  return true;
+}
+
+/**
+ * Extract provider names from text
+ */
+function extractProviderNames(text: string): string[] {
+  const providers: string[] = [];
+
+  for (const pattern of PROVIDER_PATTERNS) {
+    // Reset regex lastIndex for global patterns
+    pattern.lastIndex = 0;
+    const matches = Array.from(text.matchAll(pattern));
+    for (const match of matches) {
+      if (match[1]) {
+        const name = match[1].trim();
+        // Filter out department/location names
+        if (isProperName(name)) {
+          providers.push(name);
+        }
+      }
+    }
+  }
+
+  return Array.from(new Set(providers));
+}
+
+/**
+ * Extract MRN from text
+ */
+function extractMRN(text: string): string | null {
+  for (const pattern of MRN_PATTERNS) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(text);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Extract ordering/attesting provider from text
+ * Returns the most authoritative provider name found
+ */
+function extractOrderingProvider(text: string): string | null {
+  // Specific attestation patterns (highest priority)
+  const attestationPatterns = [
+    /Provider\s+Attestation:\s*I,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO|NP|PA|ARNP|APRN)/i,
+    /presence\s+of\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO)/i,
+    /direction\s+(?:of|and\s+in\s+the\s+presence\s+of)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),?\s*(?:MD|DO)/i,
+    /Ordering\s+(?:Provider|Physician):\s*(?:Dr\.?)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i,
+  ];
+
+  for (const pattern of attestationPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && isProperName(match[1].trim())) {
+      return match[1].trim();
+    }
+  }
+
+  // Fall back to general provider extraction
+  const providers = extractProviderNames(text);
+  return providers.length > 0 ? providers[0] : null;
+}
+
+export interface ExtractedPatientInfo {
+  mrn: string | null;
+  orderingProvider: string | null;
+  allProviders: string[];
+}
+
+/**
+ * Extract patient information from clinical notes
+ */
+export function extractPatientInfo(text: string): ExtractedPatientInfo {
+  const mrn = extractMRN(text);
+  const orderingProvider = extractOrderingProvider(text);
+  const allProviders = extractProviderNames(text);
+
+  return {
+    mrn,
+    orderingProvider,
+    allProviders,
+  };
+}
+
+/**
+ * Split notes into sections (each note/visit)
+ */
+export function splitIntoSections(text: string): NoteSection[] {
+  // Common section delimiters
+  const delimiters = [
+    /(?:^|\n)[-=]{3,}(?:\n|$)/g,
+    /(?:^|\n)(?:Note|Visit|Encounter|Progress Note|Consult|Assessment)[\s:]+/gi,
+    /(?:^|\n)(?:Date of Service|DOS|Visit Date)[\s:]+/gi,
+  ];
+
+  let sections: string[] = [text];
+
+  // Try to split by delimiters
+  for (const delimiter of delimiters) {
+    const newSections: string[] = [];
+    for (const section of sections) {
+      const parts = section.split(delimiter).filter((s) => s.trim().length > 50);
+      if (parts.length > 1) {
+        newSections.push(...parts);
+      } else {
+        newSections.push(section);
+      }
+    }
+    sections = newSections;
+  }
+
+  // Process each section
+  return sections.map((sectionText) => {
+    const specialist = detectSpecialist(sectionText);
+    const dates = extractDates(sectionText);
+    const providers = extractProviderNames(sectionText);
+
+    return {
+      text: sectionText,
+      specialist,
+      providerName: providers[0] || null,
+      date: dates[0]?.date || null,
+      dateString: dates[0]?.dateString || null,
+    };
+  });
+}
+
+/**
+ * Check if a finding is negated in context
+ */
+function isNegated(text: string, matchStart: number): boolean {
+  // Look at the 50 characters before the match
+  const contextStart = Math.max(0, matchStart - 50);
+  const context = text.substring(contextStart, matchStart).toLowerCase();
+
+  for (const negation of NEGATION_PATTERNS) {
+    if (context.includes(negation)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Check if a finding is explicitly present
+ */
+function isExplicitlyPresent(text: string, matchStart: number): boolean {
+  const contextStart = Math.max(0, matchStart - 50);
+  const context = text.substring(contextStart, matchStart).toLowerCase();
+
+  for (const presence of PRESENCE_PATTERNS) {
+    if (context.includes(presence)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Get surrounding context for a match
+ */
+function getContext(text: string, matchStart: number, matchEnd: number): string {
+  const contextStart = Math.max(0, matchStart - 100);
+  const contextEnd = Math.min(text.length, matchEnd + 100);
+  return text.substring(contextStart, contextEnd).trim();
+}
+
+/**
+ * Detect clinical findings in a note section
+ */
+function detectFindingsInSection(section: NoteSection): DetectedFinding[] {
+  const findings: DetectedFinding[] = [];
+  const lowerText = section.text.toLowerCase();
+
+  for (const term of ALL_CLINICAL_TERMS) {
+    for (const variation of term.variations) {
+      const regex = new RegExp(`\\b${variation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
+      let match;
+
+      while ((match = regex.exec(lowerText)) !== null) {
+        const negated = isNegated(lowerText, match.index);
+        const explicitlyPresent = isExplicitlyPresent(lowerText, match.index);
+
+        // Calculate confidence based on context
+        let confidence = 0.7; // Base confidence
+        if (explicitlyPresent) confidence = 0.9;
+        if (negated) confidence = 0.85; // We're confident it's negated
+        if (section.specialist) confidence += 0.1 * (1 - section.specialist.priority / 5);
+
+        findings.push({
+          term,
+          matchedText: match[0],
+          isPresent: !negated,
+          isNegated: negated,
+          context: getContext(section.text, match.index, match.index + match[0].length),
+          specialist: section.specialist,
+          providerName: section.providerName,
+          date: section.date,
+          dateString: section.dateString,
+          confidence: Math.min(confidence, 1),
+        });
+      }
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Resolve conflicts between findings
+ */
+function resolveConflicts(findings: DetectedFinding[]): {
+  resolved: DetectedFinding[];
+  conflicts: AnalysisResult["conflictingInfo"];
+} {
+  const findingsByTerm = new Map<string, DetectedFinding[]>();
+
+  // Group findings by term
+  for (const finding of findings) {
+    const key = finding.term.term;
+    if (!findingsByTerm.has(key)) {
+      findingsByTerm.set(key, []);
+    }
+    findingsByTerm.get(key)!.push(finding);
+  }
+
+  const resolved: DetectedFinding[] = [];
+  const conflicts: AnalysisResult["conflictingInfo"] = [];
+
+  for (const [termName, termFindings] of Array.from(findingsByTerm.entries())) {
+    // Separate present and negated findings
+    const presentFindings = termFindings.filter((f: DetectedFinding) => f.isPresent);
+    const negatedFindings = termFindings.filter((f: DetectedFinding) => !f.isPresent);
+
+    if (presentFindings.length > 0 && negatedFindings.length > 0) {
+      // There's a conflict - apply resolution logic
+      const bestPresent = presentFindings.reduce((best: DetectedFinding, current: DetectedFinding) =>
+        (current.specialist?.priority ?? 99) < (best.specialist?.priority ?? 99) ? current : best
+      );
+      const bestNegated = negatedFindings.reduce((best: DetectedFinding, current: DetectedFinding) =>
+        (current.specialist?.priority ?? 99) < (best.specialist?.priority ?? 99) ? current : best
+      );
+
+      const resolution = resolveSpecialistConflict(
+        bestPresent.specialist,
+        bestNegated.specialist,
+        bestPresent.date,
+        bestNegated.date
+      );
+
+      if (resolution.resolved) {
+        if (resolution.winner === "first") {
+          resolved.push(bestPresent);
+        } else {
+          resolved.push(bestNegated);
+        }
+      } else {
+        // Manual review needed
+        conflicts.push({
+          finding: termName,
+          sources: [
+            {
+              specialty: bestPresent.specialist?.name || "Unknown",
+              assessment: "Present",
+              date: bestPresent.dateString,
+            },
+            {
+              specialty: bestNegated.specialist?.name || "Unknown",
+              assessment: "Absent/Denied",
+              date: bestNegated.dateString,
+            },
+          ],
+        });
+        // Still include the higher-priority finding
+        resolved.push(bestPresent);
+      }
+    } else if (presentFindings.length > 0) {
+      // Only present findings - use the best one
+      const best = presentFindings.reduce((best: DetectedFinding, current: DetectedFinding) =>
+        (current.specialist?.priority ?? 99) < (best.specialist?.priority ?? 99) ? current : best
+      );
+      resolved.push(best);
+    } else if (negatedFindings.length > 0) {
+      // Only negated findings - use the best one
+      const best = negatedFindings.reduce((best: DetectedFinding, current: DetectedFinding) =>
+        (current.specialist?.priority ?? 99) < (best.specialist?.priority ?? 99) ? current : best
+      );
+      resolved.push(best);
+    }
+  }
+
+  return { resolved, conflicts };
+}
+
+/**
+ * Determine qualification status based on findings
+ */
+function determineQualification(
+  findings: DetectedFinding[],
+  conflicts: AnalysisResult["conflictingInfo"]
+): {
+  status: AnalysisResult["qualificationStatus"];
+  primaryIndication: string | null;
+  confidence: AnalysisResult["confidenceLevel"];
+} {
+  const presentFindings = findings.filter((f) => f.isPresent);
+
+  // Count by category
+  const symptomCount = presentFindings.filter(
+    (f) => CARDIAC_SYMPTOMS.some((s) => s.term === f.term.term)
+  ).length;
+  const historyCount = presentFindings.filter(
+    (f) => CARDIAC_HISTORY.some((h) => h.term === f.term.term)
+  ).length;
+  const findingsCount = presentFindings.filter(
+    (f) => CARDIAC_FINDINGS.some((c) => c.term === f.term.term)
+  ).length;
+  const riskFactorCount = presentFindings.filter(
+    (f) => RISK_FACTORS.some((r) => r.term === f.term.term)
+  ).length;
+
+  // Calculate total weight
+  const totalWeight = presentFindings.reduce((sum, f) => sum + f.term.weight, 0);
+
+  // Find highest weight finding for primary indication
+  const sortedByWeight = [...presentFindings].sort((a, b) => b.term.weight - a.term.weight);
+  const primaryIndication = sortedByWeight[0]?.term.term || null;
+
+  // Determine confidence based on source quality
+  let confidence: AnalysisResult["confidenceLevel"] = "Medium";
+  const hasHighPrioritySource = presentFindings.some(
+    (f) => f.specialist && f.specialist.priority <= 2
+  );
+  const hasConflicts = conflicts.length > 0;
+
+  if (hasHighPrioritySource && !hasConflicts) {
+    confidence = "High";
+  } else if (hasConflicts || !hasHighPrioritySource) {
+    confidence = hasHighPrioritySource ? "Medium" : "Low";
+  }
+
+  // Qualification logic
+  // Qualified if:
+  // - Any cardiac history (MI, CHF, valve disease, etc.) OR
+  // - Any cardiac findings (abnormal EKG, elevated troponin, etc.) OR
+  // - 2+ cardiac symptoms OR
+  // - 1 cardiac symptom from high-priority source OR
+  // - 3+ risk factors combined with any symptom
+
+  if (historyCount > 0 || findingsCount > 0) {
+    return { status: "Qualified", primaryIndication, confidence };
+  }
+
+  if (symptomCount >= 2) {
+    return { status: "Qualified", primaryIndication, confidence };
+  }
+
+  if (symptomCount >= 1 && hasHighPrioritySource) {
+    return { status: "Qualified", primaryIndication, confidence };
+  }
+
+  if (riskFactorCount >= 3 && symptomCount >= 1) {
+    return { status: "Qualified", primaryIndication, confidence };
+  }
+
+  // Review needed if:
+  // - Has conflicts OR
+  // - Has 1 symptom but not from high-priority source OR
+  // - Has only risk factors (multiple)
+  if (conflicts.length > 0) {
+    return { status: "Review Needed", primaryIndication, confidence: "Low" };
+  }
+
+  if (symptomCount === 1) {
+    return { status: "Review Needed", primaryIndication, confidence: "Low" };
+  }
+
+  if (riskFactorCount >= 2 && totalWeight >= 6) {
+    return { status: "Review Needed", primaryIndication, confidence: "Low" };
+  }
+
+  return { status: "Not Qualified", primaryIndication: null, confidence };
+}
+
+/**
+ * Main analysis function
+ */
+export function analyzeNotes(rawNotes: string): AnalysisResult {
+  // Extract patient information from the full notes
+  const extractedInfo = extractPatientInfo(rawNotes);
+
+  // Split into sections
+  const sections = splitIntoSections(rawNotes);
+
+  // Detect findings in all sections
+  const allFindings: DetectedFinding[] = [];
+  for (const section of sections) {
+    const sectionFindings = detectFindingsInSection(section);
+    allFindings.push(...sectionFindings);
+  }
+
+  // Resolve conflicts
+  const { resolved, conflicts } = resolveConflicts(allFindings);
+
+  // Determine qualification
+  const { status, primaryIndication, confidence } = determineQualification(resolved, conflicts);
+
+  // Build supporting findings list (only present findings)
+  const presentFindings = resolved.filter((f) => f.isPresent);
+  const supportingFindings = Array.from(new Set(presentFindings.map((f) => f.term.term)));
+
+  // Build clinical citations
+  const clinicalCitations = presentFindings.map((f) => ({
+    finding: f.term.term,
+    specialty: f.specialist?.name || "Unknown",
+    provider: f.providerName,
+    date: f.dateString,
+    priority: f.specialist?.priority ?? 99,
+  }));
+
+  // Remove duplicates from citations (keep highest priority)
+  const uniqueCitations = clinicalCitations.reduce(
+    (acc, citation) => {
+      const existing = acc.find((c) => c.finding === citation.finding);
+      if (!existing || citation.priority < existing.priority) {
+        return [...acc.filter((c) => c.finding !== citation.finding), citation];
+      }
+      return acc;
+    },
+    [] as typeof clinicalCitations
+  );
+
+  return {
+    qualificationStatus: status,
+    primaryIndication,
+    supportingFindings,
+    clinicalCitations: uniqueCitations,
+    conflictingInfo: conflicts,
+    confidenceLevel: confidence,
+    allFindings,
+    extractedInfo,
+  };
+}
+
+/**
+ * Format citations as a string
+ */
+export function formatCitations(
+  citations: {
+    finding: string;
+    specialty: string;
+    provider?: string | null;
+    date?: string | null;
+    priority: number;
+  }[]
+): string {
+  return citations
+    .map((c) => {
+      let citation = `${c.finding} from ${c.specialty}`;
+      if (c.provider) citation += ` with Dr. ${c.provider}`;
+      if (c.date) citation += ` on ${c.date}`;
+      return citation;
+    })
+    .join("; ");
+}
