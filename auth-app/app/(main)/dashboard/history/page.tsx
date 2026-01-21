@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -22,7 +22,7 @@ import { Id } from "@/convex/_generated/dataModel";
 
 type StatusFilter = "all" | "Qualified" | "Not Qualified" | "Review Needed";
 
-export default function HistoryPage() {
+function HistoryContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialStatus = searchParams.get("status") as StatusFilter || "all";
@@ -299,5 +299,12 @@ export default function HistoryPage() {
         )}
       </div>
     </div>
+  );
+}
+export default function HistoryPage() {
+  return (
+    <Suspense fallback={<LoadingTable />}>
+      <HistoryContent />
+    </Suspense>
   );
 }
