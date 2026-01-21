@@ -30,7 +30,7 @@ export default defineSchema({
     insurance: v.optional(v.string()),
     provider: v.optional(v.string()),
     rawNotes: v.string(),
-    qualificationStatus: v.string(), // "Qualified" | "Not Qualified" | "Review Needed"
+    qualificationStatus: v.string(), // "Qualified" | "Not Qualified" | "Review Needed" | "Insufficient Information"
     primaryIndication: v.optional(v.string()),
     supportingFindings: v.array(v.string()),
     clinicalCitations: v.array(

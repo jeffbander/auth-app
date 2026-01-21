@@ -3,15 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-  "dev": "npm run dev:convex & npm run dev:next",
-  "dev:next": "next dev",
-  "dev:convex": "convex dev",
-  "build": "next build",
-  "vercel-build": "npx convex deploy --cmd 'npx convex codegen' && next build",
-  "start": "next start",
-  "lint": "next lint"
+    "dev": "npm run dev:convex & npm run dev:next",
+    "dev:next": "next dev",
+    "dev:convex": "convex dev",
+    "build": "next build",
+    "vercel-build": "npx convex deploy --cmd 'npx convex codegen' && next build",
+    "start": "next start",
+    "lint": "next lint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
     "@clerk/nextjs": "^5.7.1",
     "@heroicons/react": "^2.2.0",
     "clsx": "^2.1.1",

@@ -3,7 +3,7 @@
 import { clsx } from "clsx";
 
 interface StatusBadgeProps {
-  status: "Qualified" | "Not Qualified" | "Review Needed" | string;
+  status: "Qualified" | "Not Qualified" | "Review Needed" | "Insufficient Information" | string;
   size?: "sm" | "md" | "lg";
 }
 
@@ -12,6 +12,7 @@ export function StatusBadge({ status, size = "md" }: StatusBadgeProps) {
     Qualified: "bg-green-100 text-green-800 border-green-200",
     "Not Qualified": "bg-red-100 text-red-800 border-red-200",
     "Review Needed": "bg-yellow-100 text-yellow-800 border-yellow-200",
+    "Insufficient Information": "bg-slate-100 text-slate-800 border-slate-300",
   };
 
   const sizeStyles = {
@@ -34,7 +35,8 @@ export function StatusBadge({ status, size = "md" }: StatusBadgeProps) {
           "mr-1.5 h-1.5 w-1.5 rounded-full",
           status === "Qualified" && "bg-green-500",
           status === "Not Qualified" && "bg-red-500",
-          status === "Review Needed" && "bg-yellow-500"
+          status === "Review Needed" && "bg-yellow-500",
+          status === "Insufficient Information" && "bg-slate-500"
         )}
       />
       {status}

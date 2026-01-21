@@ -435,46 +435,172 @@ export const ALL_CLINICAL_TERMS: ClinicalTerm[] = [
 ];
 
 // Negation patterns to detect when a finding is being denied
+// IMPORTANT: Order matters - more specific patterns should come first
 export const NEGATION_PATTERNS: string[] = [
-  "no ",
+  // Explicit denial phrases
+  "patient denies",
+  "denies any",
   "denies ",
   "denied ",
-  "negative for ",
-  "without ",
-  "absence of ",
-  "not present",
-  "not found",
-  "ruled out",
+  "does not have",
+  "doesn't have",
+  "did not have",
+  "didn't have",
+  "has no ",
+  "had no ",
+  "no history of",
+  "no known history of",
+  "no prior history of",
   "no evidence of",
   "no signs of",
   "no symptoms of",
-  "patient denies",
-  "no history of",
+  "no current",
+  "no active",
+  "no acute",
+  "no significant",
   "never had",
-  "does not have",
-  "doesn't have",
+  "never experienced",
+  "not experiencing",
+  "not present",
+  "not found",
+  "not noted",
+  "not observed",
+  "not detected",
+  "not identified",
+  "negative for ",
+  "ruled out",
+  "rules out",
+  "r/o ",
+  "rule out ",
+  "without ",
+  "absence of ",
+  "absent ",
+  "free of ",
+  "free from ",
+  "unremarkable for",
+  "no ",
+  // Past negation (resolved/no longer)
+  "resolved ",
+  "no longer has",
+  "no longer experiencing",
+  "previously had but",
+  // Conditional negations
+  "if no ",
+  "unless ",
 ];
 
-// Presence patterns to detect when a finding is confirmed
+// Compound negation prefixes - these attach directly to words
+// e.g., "nonsmoker", "non-smoker", "non-cardiac"
+export const COMPOUND_NEGATION_PREFIXES: string[] = [
+  "non-",
+  "non",
+  "un",
+  "a-",  // e.g., "asymptomatic"
+];
+
+// Words that indicate absence when found as part of the matched term
+export const NEGATED_COMPOUND_TERMS: string[] = [
+  "nonsmoker",
+  "non-smoker",
+  "nondiabetic",
+  "non-diabetic",
+  "asymptomatic",
+  "afebrile",
+  "normotensive",
+  "non-cardiac",
+  "noncardiac",
+  "non-anginal",
+  "nonanginal",
+  "atypical",  // "atypical chest pain" often means NOT cardiac
+  "musculoskeletal", // when combined with chest pain, negates cardiac
+  "pleuritic", // pleuritic chest pain is usually not cardiac
+];
+
+// Presence patterns to detect when a finding is EXPLICITLY confirmed
+// IMPORTANT: These must indicate the condition IS present, not just mentioned
 export const PRESENCE_PATTERNS: string[] = [
+  // Strong positive indicators
   "positive for ",
+  "confirmed ",
+  "diagnosed with ",
+  "diagnosis of ",
+  "known history of ",
+  "known ",
+  "active ",
+  "acute ",
+  "current ",
+  "ongoing ",
+  "chronic ",
+  "established ",
+  // Patient-reported (active)
+  "complains of ",
+  "complaining of ",
   "presents with ",
   "presenting with ",
-  "complains of ",
   "reports ",
-  "history of ",
-  "diagnosed with ",
-  "known ",
-  "has ",
-  "with ",
-  "shows ",
+  "reporting ",
+  "states ",
+  "states he has ",
+  "states she has ",
+  "endorses ",
+  "admits to ",
+  "experiencing ",
+  "has been having ",
+  "currently has ",
+  "currently experiencing ",
+  // Clinical findings (observed)
   "demonstrates ",
+  "demonstrates evidence of ",
   "reveals ",
-  "consistent with ",
-  "suggestive of ",
-  "evidence of ",
-  "findings of ",
-  "noted ",
+  "shows ",
+  "showing ",
+  "noted to have ",
+  "found to have ",
   "observed ",
-  "found ",
+  "evidence of ",
+  "consistent with ",
+  "indicative of ",
+  "suggestive of ",
+  // Historical (but still relevant)
+  "history of ",
+  "h/o ",
+  "hx of ",
+  "past medical history of ",
+  "pmh of ",
+  "pmhx ",
+  "significant for ",
+  "significant pmh ",
+];
+
+// Uncertain/ambiguous patterns - these should NOT count as confirmed presence
+export const UNCERTAIN_PATTERNS: string[] = [
+  "possible ",
+  "possibly ",
+  "probable ",
+  "probably ",
+  "likely ",
+  "unlikely ",
+  "may have ",
+  "might have ",
+  "could have ",
+  "could be ",
+  "questionable ",
+  "question of ",
+  "consider ",
+  "cannot rule out",
+  "cannot exclude",
+  "to rule out",
+  "to exclude",
+  "workup for ",
+  "evaluate for ",
+  "evaluation for ",
+  "suspected ",
+  "suspicion of ",
+  "concern for ",
+  "concerning for ",
+  "? ",  // question mark before finding
+  "vs ",  // differential diagnosis
+  "versus ",
+  "differential ",
+  "ddx ",
 ];

@@ -5,6 +5,9 @@ import {
   ClinicalTerm,
   NEGATION_PATTERNS,
   PRESENCE_PATTERNS,
+  UNCERTAIN_PATTERNS,
+  COMPOUND_NEGATION_PREFIXES,
+  NEGATED_COMPOUND_TERMS,
   CARDIAC_SYMPTOMS,
   CARDIAC_HISTORY,
   CARDIAC_FINDINGS,
@@ -21,6 +24,8 @@ export interface DetectedFinding {
   matchedText: string;
   isPresent: boolean;
   isNegated: boolean;
+  isUncertain: boolean;  // True if finding is mentioned but uncertain (possible, likely, r/o, etc.)
+  isExplicitlyConfirmed: boolean;  // True only if explicit presence pattern found
   context: string;
   specialist: DetectedSpecialist | null;
   providerName: string | null;
@@ -38,7 +43,7 @@ export interface NoteSection {
 }
 
 export interface AnalysisResult {
-  qualificationStatus: "Qualified" | "Not Qualified" | "Review Needed";
+  qualificationStatus: "Qualified" | "Not Qualified" | "Review Needed" | "Insufficient Information";
   primaryIndication: string | null;
   supportingFindings: string[];
   clinicalCitations: {
@@ -60,6 +65,8 @@ export interface AnalysisResult {
   allFindings: DetectedFinding[];
   // Extracted patient information
   extractedInfo: ExtractedPatientInfo;
+  // Explanation when insufficient information
+  insufficientReason?: string;
 }
 
 // Date extraction patterns - ordered by specificity
@@ -347,15 +354,15 @@ export function splitIntoSections(text: string): NoteSection[] {
 }
 
 /**
- * Check if a finding is negated in context
+ * Check if the matched text itself is a negated compound term
+ * e.g., "nonsmoker", "non-smoker", "asymptomatic"
  */
-function isNegated(text: string, matchStart: number): boolean {
-  // Look at the 50 characters before the match
-  const contextStart = Math.max(0, matchStart - 50);
-  const context = text.substring(contextStart, matchStart).toLowerCase();
+function isNegatedCompoundTerm(matchedText: string): boolean {
+  const lowerMatch = matchedText.toLowerCase();
 
-  for (const negation of NEGATION_PATTERNS) {
-    if (context.includes(negation)) {
+  // Check against known negated compound terms
+  for (const term of NEGATED_COMPOUND_TERMS) {
+    if (lowerMatch.includes(term) || term.includes(lowerMatch)) {
       return true;
     }
   }
@@ -364,15 +371,91 @@ function isNegated(text: string, matchStart: number): boolean {
 }
 
 /**
- * Check if a finding is explicitly present
+ * Check if a finding is negated in context
+ * IMPROVED: Larger context window, checks compound terms, handles word boundaries
  */
-function isExplicitlyPresent(text: string, matchStart: number): boolean {
-  const contextStart = Math.max(0, matchStart - 50);
+function isNegated(text: string, matchStart: number, matchedText: string): boolean {
+  // First, check if the matched text itself is a negated compound term
+  if (isNegatedCompoundTerm(matchedText)) {
+    return true;
+  }
+
+  // Look at the 80 characters before the match for negation patterns
+  const contextStart = Math.max(0, matchStart - 80);
+  const contextBefore = text.substring(contextStart, matchStart).toLowerCase();
+
+  // Also check the immediate preceding word for compound negation prefixes
+  // This catches cases like "non-smoker" when we matched "smoker"
+  const immediateContext = text.substring(Math.max(0, matchStart - 10), matchStart).toLowerCase();
+  for (const prefix of COMPOUND_NEGATION_PREFIXES) {
+    // Check if the word immediately before is a negation prefix
+    if (immediateContext.trim().endsWith(prefix) || immediateContext.includes(prefix + "-")) {
+      return true;
+    }
+  }
+
+  // Check for negation patterns in the preceding context
+  for (const negation of NEGATION_PATTERNS) {
+    // Look for the negation pattern
+    const negationIndex = contextBefore.lastIndexOf(negation);
+    if (negationIndex !== -1) {
+      // Make sure there's no intervening sentence break (period, newline, etc.)
+      // between the negation and the match
+      const textAfterNegation = contextBefore.substring(negationIndex + negation.length);
+      if (!textAfterNegation.includes(".") &&
+          !textAfterNegation.includes("\n") &&
+          !textAfterNegation.includes(";") &&
+          !textAfterNegation.includes(" but ") &&
+          !textAfterNegation.includes(" however ")) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Check if a finding is uncertain (possible, rule out, etc.)
+ * Findings marked as uncertain should NOT be treated as confirmed present
+ */
+function isUncertain(text: string, matchStart: number): boolean {
+  const contextStart = Math.max(0, matchStart - 60);
   const context = text.substring(contextStart, matchStart).toLowerCase();
 
-  for (const presence of PRESENCE_PATTERNS) {
-    if (context.includes(presence)) {
+  for (const uncertain of UNCERTAIN_PATTERNS) {
+    if (context.includes(uncertain)) {
       return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Check if a finding is EXPLICITLY confirmed present
+ * IMPORTANT: A finding should only be marked as present if there's explicit
+ * confirmation - not just because the words appear in the chart
+ */
+function isExplicitlyPresent(text: string, matchStart: number): boolean {
+  const contextStart = Math.max(0, matchStart - 60);
+  const context = text.substring(contextStart, matchStart).toLowerCase();
+
+  // First check if it's uncertain - uncertain findings are NOT explicitly present
+  if (isUncertain(text, matchStart)) {
+    return false;
+  }
+
+  for (const presence of PRESENCE_PATTERNS) {
+    const presenceIndex = context.lastIndexOf(presence);
+    if (presenceIndex !== -1) {
+      // Make sure no sentence break between presence indicator and the match
+      const textAfterPresence = context.substring(presenceIndex + presence.length);
+      if (!textAfterPresence.includes(".") &&
+          !textAfterPresence.includes("\n") &&
+          !textAfterPresence.includes(";")) {
+        return true;
+      }
     }
   }
 
@@ -390,6 +473,8 @@ function getContext(text: string, matchStart: number, matchEnd: number): string 
 
 /**
  * Detect clinical findings in a note section
+ * IMPROVED: Requires explicit confirmation to mark as present
+ * Does NOT assume presence just because words appear in chart
  */
 function detectFindingsInSection(section: NoteSection): DetectedFinding[] {
   const findings: DetectedFinding[] = [];
@@ -401,20 +486,41 @@ function detectFindingsInSection(section: NoteSection): DetectedFinding[] {
       let match;
 
       while ((match = regex.exec(lowerText)) !== null) {
-        const negated = isNegated(lowerText, match.index);
-        const explicitlyPresent = isExplicitlyPresent(lowerText, match.index);
+        const negated = isNegated(lowerText, match.index, match[0]);
+        const uncertain = isUncertain(lowerText, match.index);
+        const explicitlyConfirmed = isExplicitlyPresent(lowerText, match.index);
+
+        // CRITICAL LOGIC CHANGE:
+        // A finding is only marked as "present" if:
+        // 1. It is EXPLICITLY confirmed by a presence pattern, AND
+        // 2. It is NOT negated, AND
+        // 3. It is NOT marked as uncertain
+        //
+        // If the term just appears in the chart without explicit confirmation,
+        // it should NOT be marked as present (prevents hallucination)
+        const isPresent = explicitlyConfirmed && !negated && !uncertain;
 
         // Calculate confidence based on context
-        let confidence = 0.7; // Base confidence
-        if (explicitlyPresent) confidence = 0.9;
-        if (negated) confidence = 0.85; // We're confident it's negated
+        let confidence = 0.5; // Base confidence is now lower
+        if (explicitlyConfirmed && !negated && !uncertain) {
+          confidence = 0.9; // High confidence for explicitly confirmed
+        } else if (negated) {
+          confidence = 0.85; // We're confident it's negated
+        } else if (uncertain) {
+          confidence = 0.4; // Low confidence for uncertain findings
+        } else {
+          // Term appears but not explicitly confirmed - very low confidence
+          confidence = 0.3;
+        }
         if (section.specialist) confidence += 0.1 * (1 - section.specialist.priority / 5);
 
         findings.push({
           term,
           matchedText: match[0],
-          isPresent: !negated,
+          isPresent,
           isNegated: negated,
+          isUncertain: uncertain,
+          isExplicitlyConfirmed: explicitlyConfirmed,
           context: getContext(section.text, match.index, match.index + match[0].length),
           specialist: section.specialist,
           providerName: section.providerName,
@@ -517,6 +623,8 @@ function resolveConflicts(findings: DetectedFinding[]): {
 
 /**
  * Determine qualification status based on findings
+ * IMPROVED: Returns "Insufficient Information" when there's not enough
+ * explicit clinical data to make a determination
  */
 function determineQualification(
   findings: DetectedFinding[],
@@ -525,10 +633,15 @@ function determineQualification(
   status: AnalysisResult["qualificationStatus"];
   primaryIndication: string | null;
   confidence: AnalysisResult["confidenceLevel"];
+  insufficientReason?: string;
 } {
-  const presentFindings = findings.filter((f) => f.isPresent);
+  // Only count findings that are EXPLICITLY confirmed as present
+  // This prevents "hallucinating" findings just because words appear in the chart
+  const presentFindings = findings.filter((f) => f.isPresent && f.isExplicitlyConfirmed);
+  const uncertainFindings = findings.filter((f) => f.isUncertain && !f.isNegated);
+  const negatedFindings = findings.filter((f) => f.isNegated);
 
-  // Count by category
+  // Count by category - ONLY explicitly confirmed findings
   const symptomCount = presentFindings.filter(
     (f) => CARDIAC_SYMPTOMS.some((s) => s.term === f.term.term)
   ).length;
@@ -562,7 +675,44 @@ function determineQualification(
     confidence = hasHighPrioritySource ? "Medium" : "Low";
   }
 
-  // Qualification logic
+  // INSUFFICIENT INFORMATION CHECK
+  // If we have NO explicitly confirmed present findings and only:
+  // - Negated findings (patient denies chest pain, nonsmoker, etc.)
+  // - Uncertain findings (possible, rule out, etc.)
+  // - Unconfirmed mentions (words appear but no explicit confirmation)
+  // Then we don't have enough information to make a qualification decision
+  if (presentFindings.length === 0) {
+    // Check if we have some uncertain findings that need clarification
+    if (uncertainFindings.length > 0) {
+      const uncertainTerms = Array.from(new Set(uncertainFindings.map(f => f.term.term))).join(", ");
+      return {
+        status: "Insufficient Information",
+        primaryIndication: null,
+        confidence: "Low",
+        insufficientReason: `The chart mentions possible/suspected conditions (${uncertainTerms}) but does not explicitly confirm them. Cannot determine qualification without confirmed clinical findings.`
+      };
+    }
+
+    // Check if we only have negated findings
+    if (negatedFindings.length > 0 && findings.length === negatedFindings.length) {
+      return {
+        status: "Insufficient Information",
+        primaryIndication: null,
+        confidence: "Low",
+        insufficientReason: "The chart only contains denied or negated findings. No positive cardiac indications were explicitly documented."
+      };
+    }
+
+    // No meaningful clinical findings at all
+    return {
+      status: "Insufficient Information",
+      primaryIndication: null,
+      confidence: "Low",
+      insufficientReason: "The chart does not contain explicitly confirmed cardiac symptoms, history, or findings. Cannot determine qualification without documented clinical evidence."
+    };
+  }
+
+  // Qualification logic (same as before, but now only using confirmed findings)
   // Qualified if:
   // - Any cardiac history (MI, CHF, valve disease, etc.) OR
   // - Any cardiac findings (abnormal EKG, elevated troponin, etc.) OR
@@ -590,6 +740,7 @@ function determineQualification(
   // - Has conflicts OR
   // - Has 1 symptom but not from high-priority source OR
   // - Has only risk factors (multiple)
+  // - Has uncertain findings that should be clarified
   if (conflicts.length > 0) {
     return { status: "Review Needed", primaryIndication, confidence: "Low" };
   }
@@ -602,6 +753,11 @@ function determineQualification(
     return { status: "Review Needed", primaryIndication, confidence: "Low" };
   }
 
+  // If we have uncertain findings alongside confirmed ones, flag for review
+  if (uncertainFindings.length > 0) {
+    return { status: "Review Needed", primaryIndication, confidence: "Low" };
+  }
+
   return { status: "Not Qualified", primaryIndication: null, confidence };
 }
 
@@ -609,6 +765,21 @@ function determineQualification(
  * Main analysis function
  */
 export function analyzeNotes(rawNotes: string): AnalysisResult {
+  // Check for minimal input
+  if (!rawNotes || rawNotes.trim().length < 20) {
+    return {
+      qualificationStatus: "Insufficient Information",
+      primaryIndication: null,
+      supportingFindings: [],
+      clinicalCitations: [],
+      conflictingInfo: [],
+      confidenceLevel: "Low",
+      allFindings: [],
+      extractedInfo: { mrn: null, orderingProvider: null, allProviders: [] },
+      insufficientReason: "The provided clinical notes are too brief to analyze. Please provide complete clinical documentation.",
+    };
+  }
+
   // Extract patient information from the full notes
   const extractedInfo = extractPatientInfo(rawNotes);
 
@@ -626,13 +797,13 @@ export function analyzeNotes(rawNotes: string): AnalysisResult {
   const { resolved, conflicts } = resolveConflicts(allFindings);
 
   // Determine qualification
-  const { status, primaryIndication, confidence } = determineQualification(resolved, conflicts);
+  const { status, primaryIndication, confidence, insufficientReason } = determineQualification(resolved, conflicts);
 
-  // Build supporting findings list (only present findings)
-  const presentFindings = resolved.filter((f) => f.isPresent);
+  // Build supporting findings list (only EXPLICITLY CONFIRMED present findings)
+  const presentFindings = resolved.filter((f) => f.isPresent && f.isExplicitlyConfirmed);
   const supportingFindings = Array.from(new Set(presentFindings.map((f) => f.term.term)));
 
-  // Build clinical citations
+  // Build clinical citations - only for confirmed findings
   const clinicalCitations = presentFindings.map((f) => ({
     finding: f.term.term,
     specialty: f.specialist?.name || "Unknown",
@@ -662,6 +833,7 @@ export function analyzeNotes(rawNotes: string): AnalysisResult {
     confidenceLevel: confidence,
     allFindings,
     extractedInfo,
+    insufficientReason,
   };
 }
 
