@@ -352,6 +352,34 @@ export const CARDIAC_FINDINGS: ClinicalTerm[] = [
   },
 ];
 
+export const PRIOR_STUDIES: ClinicalTerm[] = [
+  {
+    category: "Prior Studies",
+    term: "Echocardiogram",
+    variations: [
+      "echocardiogram",
+      "echocardiography",
+      "echo",
+      "tte",
+      "transthoracic echocardiogram",
+      "transthoracic echo",
+      "tee",
+      "transesophageal echocardiogram",
+      "transesophageal echo",
+      "stress echo",
+      "stress echocardiogram",
+      "dobutamine stress echo",
+      "dse",
+      "bubble study",
+      "contrast echo",
+      "2d echo",
+      "cardiac ultrasound",
+      "heart ultrasound",
+    ],
+    weight: 5,
+  },
+];
+
 export const RISK_FACTORS: ClinicalTerm[] = [
   {
     category: "Risk Factors",
@@ -431,6 +459,7 @@ export const ALL_CLINICAL_TERMS: ClinicalTerm[] = [
   ...CARDIAC_SYMPTOMS,
   ...CARDIAC_HISTORY,
   ...CARDIAC_FINDINGS,
+  ...PRIOR_STUDIES,
   ...RISK_FACTORS,
 ];
 

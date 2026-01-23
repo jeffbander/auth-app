@@ -11,6 +11,7 @@ import {
   CARDIAC_SYMPTOMS,
   CARDIAC_HISTORY,
   CARDIAC_FINDINGS,
+  PRIOR_STUDIES,
   RISK_FACTORS,
 } from "./clinical-terms";
 import {
@@ -653,6 +654,9 @@ function determineQualification(
   ).length;
   const riskFactorCount = presentFindings.filter(
     (f) => RISK_FACTORS.some((r) => r.term === f.term.term)
+  ).length;
+  const priorStudiesCount = presentFindings.filter(
+    (f) => PRIOR_STUDIES.some((p) => p.term === f.term.term)
   ).length;
 
   // Calculate total weight
